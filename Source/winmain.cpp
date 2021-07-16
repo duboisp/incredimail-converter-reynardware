@@ -39,6 +39,11 @@
 #include "winmain.h"
 #include "sqlite3.h"
 
+// To trim string
+#include <algorithm> 
+#include <cctype>
+#include <locale>
+
 typedef enum {
    THREAD_NOT_STARTED = 0,
    THREAD_IN_PROGRESS = 1,
@@ -84,6 +89,25 @@ FILE *stream;
    return (int) msg.wParam;
 }
 
+// trim from start (in place)
+void ltrim(std::string& s) {
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+        }));
+}
+
+// trim from end (in place)
+void rtrim(std::string& s) {
+    s.erase(std::find_if(s.rbegin(), s.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+        }).base(), s.end());
+}
+
+// trim from both ends (in place)
+void trim(std::string& s) {
+    ltrim(s);
+    rtrim(s);
+}
 
 BOOL CALLBACK Winload( HWND hdwnd, UINT message, WPARAM wparam, LPARAM lparam ) {
 
@@ -408,6 +432,12 @@ struct im2_maildir_folder {
 
 	bool create_directories(const std::string& prefix, std::map<std::string, std::string>& container_to_dir) {
 
+        // For debug only
+        //std::string msgInfo = "Folder: ---" + foldername + "---";
+        //MessageBox(global_hwnd, msgInfo.c_str(), "Info!", MB_OK);
+        // end debug
+
+		trim(foldername);
 		std::string path = prefix + "\\" + foldername;
 		if ((!CreateDirectory(path.c_str(), NULL)) && GetLastError() != ERROR_ALREADY_EXISTS)
 			return false;
@@ -676,13 +706,17 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 
 			 const char* container = (const char*)sqlite3_column_text(stmt, 1);
 			 std::map<std::string, std::string>::iterator findit = container_to_dir.find(container);
-			 if (findit == container_to_dir.end()) {
-				 MessageBox(global_hwnd, "Message with unknown container?", "Error!", MB_OK);
-				 sqlite3_close(db);
-				 return;
-			 }
 
-			 target_path = findit->second + "\\" + new_eml_filename;
+             std::string target_base_path = "";
+
+			 if (findit == container_to_dir.end()) {
+                 target_base_path = export_directory;
+             }
+             else {
+                 target_base_path = findit->second;
+             }
+
+			 target_path = target_base_path + "\\" + new_eml_filename;
 
 			 const char* headerid = (const char*)sqlite3_column_text(stmt, 0);
 			 const char* subfolder = (const char*)sqlite3_column_text(stmt, 2);
