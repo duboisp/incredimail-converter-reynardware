@@ -420,12 +420,50 @@ HANDLE hFind;
    return 0;
 }
 
+void ReplaceStringInPlace( std::string& subject, const std::string& search, const std::string& replace ) {
+    size_t pos = 0;
+    while ( ( pos = subject.find( search, pos ) ) != std::string::npos ) {
+        subject.replace( pos, search.length(), replace );
+        pos += replace.length();
+    }
+}
+
+void ConvertUTF8FrenchBadCharacter( std::string& subject ) {
+    ReplaceStringInPlace( subject, "Γ©", "ι" );
+    ReplaceStringInPlace( subject, "Γͺ", "κ" );
+    ReplaceStringInPlace( subject, "Γ¨", "θ" );
+    ReplaceStringInPlace( subject, "Γ»", "ϋ" );
+    ReplaceStringInPlace( subject, "Γ ", "ΰ" );
+}
+
+void getTrimmedPath( std::string& name, int nbAlreadyChar ) {
+    const std::string allowedChar = "qwertyuiopasdfghjklzxcvbnm ΰθικϋ1234567890QWERTYUIOPASDFGHJKLZXCVBNM-_+";
+    name = name.substr( 0, 254 - nbAlreadyChar );
+    ConvertUTF8FrenchBadCharacter( name );
+    
+    char* char_arr;
+    std::string char_arr_cleaned;
+    char_arr = &name[ 0 ];
+    char_arr_cleaned = "";
+
+    for (int i = 0; i < name.length(); i++) {
+        if ( allowedChar.find( char_arr[ i ] ) != std::string::npos ) {
+            char_arr_cleaned = char_arr_cleaned + char_arr[ i ];
+        }
+    }
+
+    name = std::string(char_arr_cleaned);
+
+    trim(name);
+}
+
 struct im2_maildir_folder {
 	
 	struct im2_maildir_folder* parent;
 	std::vector<struct im2_maildir_folder*> children;
 	std::string id;
 	std::string foldername;
+    std::string filename;
 	std::string account;
 
 	im2_maildir_folder() : parent(0) {}
@@ -437,7 +475,8 @@ struct im2_maildir_folder {
         //MessageBox(global_hwnd, msgInfo.c_str(), "Info!", MB_OK);
         // end debug
 
-		trim(foldername);
+        getTrimmedPath(foldername, 0);
+
 		std::string path = prefix + "\\" + foldername;
 		if ((!CreateDirectory(path.c_str(), NULL)) && GetLastError() != ERROR_ALREADY_EXISTS)
 			return false;
@@ -569,6 +608,13 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 
       strcat_s( export_directory, MAX_CHAR, "\\" );
 
+      // Get the base_dir
+      std::string base_dir = im_database_filename;
+      size_t truncate_off = base_dir.rfind('\\');
+      if (truncate_off == std::string::npos)
+          truncate_off = 0;
+      base_dir.erase(truncate_off);
+
       // set the email and deleted count to zero
       e_count = 0;
       d_count = 0;
@@ -602,7 +648,7 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 			  return;
 		  }
 
-		  if (sqlite3_prepare_v2(db, "select ContainerID, ParentContainerID, Label from Containers", -1, &stmt, NULL) != SQLITE_OK) {
+		  if (sqlite3_prepare_v2(db, "select ContainerID, ParentContainerID, Label, FileName from Containers", -1, &stmt, NULL) != SQLITE_OK) {
 			  sqlite3_close(db);
 			  MessageBox(global_hwnd, "Containers query failed", "Error!", MB_OK);
 			  return;
@@ -613,6 +659,7 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 			  const char* thisid = (const char*)sqlite3_column_text(stmt, 0);
 			  const char* parentid = (const char*)sqlite3_column_text(stmt, 1);
 			  const char* label = (const char*)sqlite3_column_text(stmt, 2);
+			  const char* filename = (const char*)sqlite3_column_text(stmt, 3);
 			  
 			  im2_maildir_folder& thisfolder = containers[thisid];
 			  if (parentid && strlen(parentid)) {
@@ -621,6 +668,12 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 			  }
 			  thisfolder.id = thisid;
 			  thisfolder.foldername = label;
+              if (strlen(filename) > 0) {
+                  thisfolder.filename = base_dir;
+                  thisfolder.filename.append( "\\" );
+                  thisfolder.filename.append( filename );
+                  thisfolder.filename.append( ".imm" );
+              }
 
 			  // Figure out the owning account name from message headers:
 			  std::string name_query = "select account, count(*) from headers where containerid = \"" + thisfolder.id + "\" group by account order by count(*) desc limit 1";
@@ -667,7 +720,8 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 		  sqlite3_reset(stmt);
 		  sqlite3_finalize(stmt);
 
-		  if (sqlite3_prepare_v2(db, "select HeaderID, ContainerID, Location, Deleted from Headers where Location != \"\"", -1, &stmt, NULL) != SQLITE_OK) {
+		  //if (sqlite3_prepare_v2(db, "select HeaderID, ContainerID, Location, Deleted, Subject from Headers where Location != \"\"", -1, &stmt, NULL) != SQLITE_OK) {
+		  if (sqlite3_prepare_v2(db, "select HeaderID, ContainerID, Location, Deleted, Subject, MsgPos, MsgSize from Headers", -1, &stmt, NULL) != SQLITE_OK) {
 			  sqlite3_close(db);
 			  MessageBox(global_hwnd, "Headers query failed", "Error!", MB_OK);
 			  return;
@@ -675,11 +729,7 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 
 	  }
 
-	  std::string messages_dir = im_database_filename;
-	  size_t truncate_off = messages_dir.rfind('\\');
-	  if (truncate_off == std::string::npos)
-		  truncate_off = 0;
-	  messages_dir.erase(truncate_off);
+	  std::string messages_dir = base_dir;
 	  messages_dir.append("\\Messages");
 
 	  std::size_t n_failures = 0;
@@ -689,9 +739,10 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 
 		 std::string message_attachment_dir;
 
-		 sprintf_s(new_eml_filename, MAX_CHAR, "email%d.eml", i);
+		 sprintf_s(new_eml_filename, MAX_CHAR, "email%d", i);
 		 GetTempFileName(temp_path, "eml", 0, temp_filename);
 		 std::string target_path;
+         std::string target_filename_basepath;
 
 		 if (incredimail_version == INCREDIMAIL_2_MAILDIR) {
 			 
@@ -703,6 +754,16 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 
 			 if (export_all_email != BST_CHECKED && sqlite3_column_int(stmt, 3))
 				 continue;
+
+             //
+             // This require e_count to be total of "Headers" rows.
+             // 
+             // If no Location, get the containerID, + MsgSize + MsgPos
+             // Check if the containerID have a "FileName" and that file exist ({{FileName}}.imm
+             // // Extract the email for the {{FileName}}.imm and move it as temp file
+             // // Get all attachemtn in the Attachement table.
+             // // Move all those attachtment to local folder
+
 
 			 const char* container = (const char*)sqlite3_column_text(stmt, 1);
 			 std::map<std::string, std::string>::iterator findit = container_to_dir.find(container);
@@ -716,18 +777,51 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
                  target_base_path = findit->second;
              }
 
-			 target_path = target_base_path + "\\" + new_eml_filename;
+             target_filename_basepath = target_base_path + "\\" + new_eml_filename;
+
+             std::string file_name_eml_subject;
+             file_name_eml_subject = std::string( (const char*)sqlite3_column_text(stmt, 4) );
+
+             getTrimmedPath(file_name_eml_subject, target_filename_basepath.length() + 7);
+
+             target_path = target_filename_basepath + " - " + file_name_eml_subject + ".eml";
 
 			 const char* headerid = (const char*)sqlite3_column_text(stmt, 0);
 			 const char* subfolder = (const char*)sqlite3_column_text(stmt, 2);
 
-			 std::string source_path = messages_dir + "\\" + subfolder + "\\" + headerid + "\\msg.iml";
-			 message_attachment_dir = messages_dir + "\\" + subfolder + "\\" + headerid + "\\Attachments";
 
-			 if (!CopyFile(source_path.c_str(), temp_filename, FALSE)) {
-				 ++n_failures;
-				 continue;
-			 }
+
+
+             if (strlen(subfolder) > 0) {
+
+                 std::string source_path = messages_dir + "\\" + subfolder + "\\" + headerid + "\\msg.iml";
+                 message_attachment_dir = messages_dir + "\\" + subfolder + "\\" + headerid + "\\Attachments";
+
+                 if (!CopyFile(source_path.c_str(), temp_filename, FALSE)) {
+                     ++n_failures;
+                     continue;
+                 }
+             }
+             else {
+
+                 // Attachment location (centralized): Root/Attachments
+                 // thisid === folowing "container" variable
+                 im2_maildir_folder& currentFolder = containers[container];
+                 if (currentFolder.filename.length() == 0) {
+                     // we need to extract the email from the big file
+                     ++n_failures;
+                     continue;
+                 }
+                 offset = sqlite3_column_int(stmt, 5);
+                 size = sqlite3_column_int(stmt, 6);
+
+                 // Extract the email and move it as the temporary file
+                 extract_eml_files(currentFolder.filename.c_str(), temp_filename, offset, size);
+
+                 // Adjust the message attachement_dir
+                 message_attachment_dir = base_dir;
+                 message_attachment_dir.append("\\Attachments");
+             }
 
 		 }
 		 else {
@@ -758,7 +852,7 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 
 		 }
 
-		 im_to_eml(temp_filename, message_attachment_dir.c_str(), target_path.c_str());
+		 im_to_eml(temp_filename, message_attachment_dir.c_str(), target_path.c_str(), target_filename_basepath.c_str());
 		 DeleteFile(temp_filename);
 
          // update the progress
@@ -966,7 +1060,7 @@ enum INCREDIMAIL_VERSIONS incredimail_version;
 
                   strcat_s( export_directory, MAX_CHAR, "\\" );
                   strcat_s( export_directory, MAX_CHAR, new_eml_filename );
-                  im_to_eml( temp_filename, im_attachments_directory, export_directory );
+                  im_to_eml( temp_filename, im_attachments_directory, export_directory, "");
                   DeleteFile( temp_filename );
                }
                

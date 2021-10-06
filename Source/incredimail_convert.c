@@ -29,6 +29,43 @@
 
 const char *ATTACHMENT = "----------[%ImFilePath%]----------";
 
+typedef struct {
+	char **array;
+	size_t used;
+	size_t size;
+} Array;
+
+void initArray(Array* a, size_t initialSize) {
+	a->array = malloc(initialSize * sizeof(char*));
+	for (int i = 0; i < initialSize; i++)
+		a->array[i] = malloc((512 + 1) * sizeof(char));
+	a->used = 0;
+	a->size = initialSize;
+}
+
+void pushArray(Array* a, char* element) {
+	// a->used is the number of used entries, because a->array[a->used++] updates a->used only *after* the array has been accessed.
+	// Therefore a->used can go up to a->size 
+	if (a->used == a->size) {
+		a->size *= 2;
+		//a->array = realloc(a->array, a->size * sizeof(int));
+		a->array = realloc(a->array, a->size * sizeof(char*));
+		for (int i = a->used; i < a->size; i++)
+			a->array[i] = malloc((512 + 1) * sizeof(char));
+	}
+
+	strcpy(a->array[a->used], element);
+	char* arrayValue;
+	arrayValue = a->array[a->used];
+	a->used++;
+}
+
+void freeArray(Array* a) {
+	free(a->array);
+	a->array = NULL;
+	a->used = a->size = 0;
+}
+
 void email_count( const char *filename, int *email_total, int *deleted_emails ) {
 int dummy = 1;
 int i;
@@ -161,17 +198,31 @@ char extract_data[1024];
       CloseHandle( writing_hand );
 }
 
-void insert_attachments( char *im_filename, const char *attachments_path, const char *final_email_filename ) {
+void insert_attachments( char *im_filename, const char *attachments_path, const char *final_email_filename, const char* eml_file_basepath) {
 
    FILE *inputfile, *outputfile;
+   FILE *attachmentfile, *attachmentCopyfile;
    FILE *encode64_input_file;
 
 char string_1[512];
 char attachment_name[512];
+char attachment_name2[512];
 int attachment_length;
+
+char* attachment_extensionPos;
+char* attachment_lastExtPos;
+char* attachment_lastExtPos2;
+char attachment_nameToExport[512];
 
 char temp_path[MAX_CHAR];
 
+int attachment_id;
+
+attachment_id = 0;
+
+// Creating a Map and ensure we don't duplicate attachement, some IM email contains multiple ref (+110372 ref) to the same attachment in my test db
+Array attachmentCopied;
+initArray(&attachmentCopied, 10);
 
    inputfile = fopen(im_filename, "rb");
    outputfile = fopen(final_email_filename, "wb");
@@ -187,6 +238,70 @@ char temp_path[MAX_CHAR];
             strcpy( attachment_name, attachments_path );
             strcat( attachment_name, "\\" );
             strncat( attachment_name, &string_1[34], attachment_length - 36 );  
+			
+			//
+			// Skip if we already copied it
+			//
+			int skipFlag = 0;
+			if ( attachment_id ) {
+				// Look if we already did it, if not, keep it track and move on
+				for (int i = 0; i < attachmentCopied.used; i++) {
+					if (!strcmp(attachment_name, attachmentCopied.array[i])) {
+						skipFlag = 1;
+						break;
+					}
+				}
+				if (skipFlag) {
+					// Skip this attachment entry and move it on
+					fwrite(string_1, 1, strlen(string_1), outputfile);
+					continue;
+				}
+			}
+			pushArray(&attachmentCopied, attachment_name);
+
+
+			//
+			// Copy the attachement locally
+			//
+			// Extension
+			
+			strcpy(attachment_name2, attachment_name);
+			attachment_extensionPos = strtok(attachment_name2, ".");
+			while (attachment_extensionPos != NULL)
+			{
+				attachment_lastExtPos = attachment_extensionPos;
+				attachment_extensionPos = strtok(NULL, ".");
+			}
+			// attachment_lastExtPos
+			
+			// ++++++++++++++++++++++++++++
+			// 
+			// Ensure we don't duplicate the attachment, Like "Unnamed Account 1/DANSE SUZIE/email6160 - Re Décose de la salle.eml"
+			//
+			// TODO....
+			//
+			// +++++++++++++++++++++++++++
+
+			// Filename
+			attachment_id++;
+			char* numberstring[(((sizeof attachment_id) * CHAR_BIT) + 2) / 3 + 2];
+			sprintf(numberstring, "%d", attachment_id);
+			//c = (char)attachment_id;
+			strcpy(attachment_nameToExport, eml_file_basepath);
+			strcat(attachment_nameToExport, "-");
+			strcat(attachment_nameToExport, numberstring);
+			strcat(attachment_nameToExport, ".");
+			strcat(attachment_nameToExport, attachment_lastExtPos);
+
+			//strcat(attachment_name, ".");
+			//strcat(attachment_name, attachment_lastExtPos2);
+
+			// copy it
+			CopyFile(attachment_name, attachment_nameToExport, FALSE);
+
+			//attachmentfile = fopen(attachment_name, "rb");
+			//attachmentCopyfile = fopen(attachment_nameToExport, "wb");
+			//fwrite( )
 
             // encode the attachement
 			encode64_input_file = fopen(attachment_name, "rb");
@@ -199,8 +314,16 @@ char temp_path[MAX_CHAR];
          }
       }
    }
-   fclose( inputfile );
-   fclose( outputfile );
+
+   freeArray(&attachmentCopied);
+
+   //if (inputfile ) {
+	   fclose(inputfile);
+   //}
+	//if ( outputfile) {
+		fclose(outputfile);
+	//}
+
 }
 
 enum find_multipart_states {
@@ -212,7 +335,7 @@ enum find_multipart_states {
 	FMS_DONE
 };
 
-void im_to_eml(char* im_filename, const char* attachments_path, const char* eml_filename) {
+void im_to_eml(char* im_filename, const char* attachments_path, const char* eml_filepath, const char* eml_file_basepath) {
 
 	// Step 1: modify in-place if necessary to correct a Mime content-type that uses imbndry instead of boundary.
 	char buf[4096];
@@ -271,6 +394,8 @@ void im_to_eml(char* im_filename, const char* attachments_path, const char* eml_
 		
 		sprintf_s(fixed_name, needed, "%s_fixed", im_filename);
 
+		fixed_name = fixed_name + 
+
 		fseek(fin, 0, SEEK_SET);
 		FILE* fout = fopen(fixed_name, "w");
 		if (!fout) {
@@ -319,7 +444,14 @@ void im_to_eml(char* im_filename, const char* attachments_path, const char* eml_
 	}
 
 	// Step 2: Weave in any attachments that IncrediMail has placed out-of-line:
-	insert_attachments(im_filename, attachments_path, eml_filename);
+	insert_attachments(im_filename, attachments_path, eml_filepath, eml_file_basepath);
+
+	// Check if this email has any attachement file in the attachement folder.
+	// Copy them into the same place where is the email like: email123-1.docx
+	// {emailID}-{attachement seq id}{5 last attachement character}
+	// eml_file_basepath
+	//std::string source_path;
+
 
 }
 
@@ -468,8 +600,11 @@ void Incredimail_2_Maildir_Email_Count(const char *filename, int *email_total, i
 	sqlite3 *db;
 	sqlite3_stmt *stmt;
 
-	const char* allMailQuery = "select count(*) from Headers where Location != \"\"";
-	const char* deletedQuery = "select count(*) from Headers where Location != \"\" and deleted = 1";
+	// Entry with empty location require file split
+	//const char* allMailQuery = "select count(*) from Headers where Location != \"\"";
+	//const char* deletedQuery = "select count(*) from Headers where Location != \"\" and deleted = 1";
+	const char* allMailQuery = "select count(*) from Headers";
+	const char* deletedQuery = "select count(*) from Headers where deleted = 1";
 
 	*email_total = 0;
 	*deleted_emails = 0;
@@ -549,7 +684,9 @@ sqlite3_stmt *stmt;
       pdest = strrchr( trimmed_filename, '.' );
       trimmed_filename[strlen(trimmed_filename) - strlen(pdest)] = '\0';
    
-      sprintf(sql, "SELECT msgscount,containerID FROM CONTAINERS WHERE FILENAME='%s'", trimmed_filename);
+      //sprintf(sql, "SELECT msgscount,containerID FROM CONTAINERS WHERE FILENAME='%s'", trimmed_filename);
+	  const char* allMailQuery = "SELECT msgscount,containerID FROM CONTAINERS";
+      *sql = allMailQuery;
 
       rc = sqlite3_prepare_v2( db, sql, (int) strlen( sql ), &stmt, &tail );
 
@@ -600,7 +737,6 @@ sqlite3_stmt *stmt;
    *email_total += deleted;
    sqlite3_close( db );
 }
-
 
 void Incredimail_2_Get_Email_Offset_and_Size( const char *filename, unsigned int *file_offset, unsigned int *size, int email_index, int *deleted_email ) {
 
